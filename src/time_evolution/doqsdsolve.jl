@@ -276,3 +276,254 @@ function doqsdsolveProblem(
 
     return TimeEvolutionProblem(prob, tlist, states_type, dimensions)
 end
+
+@doc raw"""
+    doqsdsolveEnsembleProblem(
+        H::Union{AbstractQuantumObject{Operator},Tuple},
+        ψ0::QuantumObject{Ket},
+        tlist::AbstractVector,
+        sc_ops::Union{Nothing,AbstractVector,Tuple,AbstractQuantumObject},
+        op_target::QuantumObject{Operator};
+        e_ops::Union{Nothing,AbstractVector,Tuple} = nothing,
+        params = NullParameters(),
+        rng::AbstractRNG = default_rng(),
+        ntraj::Int = 500,
+        ensemblealg::EnsembleAlgorithm = EnsembleThreads(),
+        prob_func::Union{Function,Nothing} = nothing,
+        output_func::Union{Tuple,Nothing} = nothing,
+        phase_atol::Union{Nothing,Real} = nothing,
+        progress_bar::Union{Val,Bool} = Val(true),
+        store_measurement::Union{Val,Bool} = Val(false),
+        kwargs...,
+    )
+
+Generate the SDE `EnsembleProblem` for the dynamically optimal quantum state diffusion (DO-QSD) unraveling of the Lindblad equation. See [`doqsdsolveProblem`](@ref) for the definition of the stochastic differential equation and of the adaptive phases, and [Cao2025Dynamically](@cite) for more details.
+
+# Arguments
+
+- `H`: Hamiltonian of the system ``\hat{H}``. It can be either a [`QuantumObject`](@ref), a [`QuantumObjectEvolution`](@ref), or a `Tuple` of operator-function pairs.
+- `ψ0`: Initial state of the system ``|\psi(0)\rangle``.
+- `tlist`: List of time points at which to save either the state or the expectation values of the system.
+- `sc_ops`: List of stochastic collapse operators ``\{\hat{S}_n\}_n``. It can be either a `Vector`, a `Tuple` or a [`AbstractQuantumObject`](@ref). It is recommended to use the last case when only one operator is provided. They must be time-independent.
+- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent.
+- `e_ops`: List of operators for which to calculate expectation values. It can be either a `Vector` or a `Tuple`.
+- `params`: `NullParameters` of parameters to pass to the solver.
+- `rng`: Random number generator for reproducibility.
+- `ntraj`: Number of trajectories to use. Default is `500`.
+- `ensemblealg`: Ensemble method to use. Default to `EnsembleThreads()`.
+- `prob_func`: Function to use for generating the SDEProblem.
+- `output_func`: a `Tuple` containing the `Function` to use for generating the output of a single trajectory, the (optional) `Progress` object, and the (optional) `RemoteChannel` object.
+- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref).
+- `progress_bar`: Whether to show the progress bar. Using non-`Val` types might lead to type instabilities.
+- `store_measurement`: Not supported by DO-QSD, see [`doqsdsolveProblem`](@ref).
+- `kwargs`: The keyword arguments for the ODEProblem.
+
+# Notes
+
+- The states will be saved depend on the keyword argument `saveat` in `kwargs`.
+- If `e_ops` is empty, the default value of `saveat=tlist` (saving the states corresponding to `tlist`), otherwise, `saveat=[tlist[end]]` (only save the final state). You can also specify `e_ops` and `saveat` separately.
+- The default tolerances in `kwargs` are given as `reltol=2e-3` and `abstol=1e-3`.
+- For more details about `kwargs` please refer to [`DifferentialEquations.jl` (Keyword Arguments)](https://docs.sciml.ai/DiffEqDocs/stable/basics/common_solver_opts/)
+
+!!! tip "Performance Tip"
+    When `sc_ops` contains only a single operator, it is recommended to pass only that operator as the argument. This ensures that the stochastic noise is diagonal, making the simulation faster.
+
+# Returns
+
+- `prob::EnsembleProblem with SDEProblem`: The Ensemble SDEProblem for the DO-QSD time evolution.
+"""
+function doqsdsolveEnsembleProblem(
+        H::Union{AbstractQuantumObject{Operator}, Tuple},
+        ψ0::QuantumObject{Ket},
+        tlist::AbstractVector,
+        sc_ops::Union{Nothing, AbstractVector, Tuple, AbstractQuantumObject},
+        op_target::QuantumObject{Operator};
+        e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
+        params = NullParameters(),
+        rng::AbstractRNG = default_rng(),
+        ntraj::Int = 500,
+        ensemblealg::EnsembleAlgorithm = EnsembleThreads(),
+        prob_func::Union{Function, Nothing} = nothing,
+        output_func::Union{Tuple, Nothing} = nothing,
+        phase_atol::Union{Nothing, Real} = nothing,
+        progress_bar::Union{Val, Bool} = Val(true),
+        store_measurement::Union{Val, Bool} = Val(false),
+        kwargs...,
+    )
+    _prob_func =
+        isnothing(prob_func) ?
+        _ensemble_dispatch_prob_func(
+            tlist,
+            _stochastic_prob_func;
+            sc_ops = sc_ops,
+            store_measurement = Val(false),
+        ) : prob_func
+    _output_func =
+        output_func isa Nothing ?
+        _ensemble_dispatch_output_func(
+            ensemblealg,
+            progress_bar,
+            ntraj,
+            _standard_output_func;
+            progr_desc = "[doqsdsolve] ",
+        ) : output_func
+
+    prob_doqsd = doqsdsolveProblem(
+        H,
+        ψ0,
+        tlist,
+        sc_ops,
+        op_target;
+        e_ops = e_ops,
+        params = params,
+        rng = rng,
+        phase_atol = phase_atol,
+        progress_bar = Val(false),
+        store_measurement = makeVal(store_measurement),
+        kwargs...,
+    )
+
+    ensemble_prob = TimeEvolutionProblem(
+        EnsembleProblem(prob_doqsd, prob_func = _prob_func, output_func = _output_func[1], safetycopy = true),
+        prob_doqsd.times,
+        prob_doqsd.states_type,
+        prob_doqsd.dimensions,
+        (progr = _output_func[2], channel = _output_func[3], rng = rng),
+    )
+
+    return ensemble_prob
+end
+
+@doc raw"""
+    doqsdsolve(
+        H::Union{AbstractQuantumObject{Operator},Tuple},
+        ψ0::QuantumObject{Ket},
+        tlist::AbstractVector,
+        sc_ops::Union{Nothing,AbstractVector,Tuple,AbstractQuantumObject},
+        op_target::QuantumObject{Operator};
+        alg::Union{Nothing,AbstractSDEAlgorithm} = nothing,
+        e_ops::Union{Nothing,AbstractVector,Tuple} = nothing,
+        params = NullParameters(),
+        rng::AbstractRNG = default_rng(),
+        ntraj::Int = 500,
+        ensemblealg::EnsembleAlgorithm = EnsembleThreads(),
+        prob_func::Union{Function,Nothing} = nothing,
+        output_func::Union{Tuple,Nothing} = nothing,
+        phase_atol::Union{Nothing,Real} = nothing,
+        progress_bar::Union{Val,Bool} = Val(true),
+        keep_runs_results::Union{Val,Bool} = Val(false),
+        store_measurement::Union{Val,Bool} = Val(false),
+        kwargs...,
+    )
+
+Dynamically optimal quantum state diffusion (DO-QSD) evolution of a quantum system, given the system Hamiltonian ``\hat{H}``, a list of stochastic collapse operators ``\{\hat{S}_n\}_n``, and a Hermitian target observable ``\hat{O}``:
+
+```math
+d|\psi(t)\rangle = \left[-i \hat{H} + \sum_n \left(-\frac{1}{2} \hat{S}_n^\dagger \hat{S}_n - \frac{x_n^2}{2} + x_n u_n \hat{S}_n\right)\right] |\psi(t)\rangle dt + \sum_n \left(u_n \hat{S}_n - x_n\right) |\psi(t)\rangle dW_n(t)
+```
+
+where ``\ell_n = \langle \hat{S}_n \rangle_\psi``, ``x_n = \mathrm{Re}(u_n \ell_n)``, and the measurement phase of each channel is adapted to the current state,
+
+```math
+u_n = i \frac{C_n^*}{|C_n|},
+\qquad
+C_n = \langle \hat{O} \hat{S}_n \rangle_\psi - \langle \hat{O} \rangle_\psi \langle \hat{S}_n \rangle_\psi .
+```
+
+Because ``\mathrm{Re}(u_n C_n) = 0``, the target observable follows ``d\langle \hat{O} \rangle_\psi = \langle \mathcal{L}^\dagger(\hat{O}) \rangle_\psi dt``: its direct Wiener noise is removed, and the instantaneous growth rate of its trajectory variance is minimal. This typically needs far fewer trajectories than [`ssesolve`](@ref) to resolve ``\langle \hat{O} \rangle`` at a given accuracy, while the trajectory average of any observable still reproduces [`mesolve`](@ref). See [Cao2025Dynamically](@cite) for more details.
+
+# Arguments
+
+- `H`: Hamiltonian of the system ``\hat{H}``. It can be either a [`QuantumObject`](@ref), a [`QuantumObjectEvolution`](@ref), or a `Tuple` of operator-function pairs.
+- `ψ0`: Initial state of the system ``|\psi(0)\rangle``.
+- `tlist`: List of time points at which to save either the state or the expectation values of the system.
+- `sc_ops`: List of stochastic collapse operators ``\{\hat{S}_n\}_n``. It can be either a `Vector`, a `Tuple` or a [`AbstractQuantumObject`](@ref). It is recommended to use the last case when only one operator is provided. They must be time-independent.
+- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent.
+- `alg`: The algorithm to use for the stochastic differential equation. Default is `SRIW1()` if `sc_ops` is an [`AbstractQuantumObject`](@ref) (diagonal noise), and `SRA2()` otherwise (non-diagonal noise).
+- `e_ops`: List of operators for which to calculate expectation values. It can be either a `Vector` or a `Tuple`.
+- `params`: `NullParameters` of parameters to pass to the solver.
+- `rng`: Random number generator for reproducibility.
+- `ntraj`: Number of trajectories to use. Default is `500`.
+- `ensemblealg`: Ensemble method to use. Default to `EnsembleThreads()`.
+- `prob_func`: Function to use for generating the SDEProblem.
+- `output_func`: a `Tuple` containing the `Function` to use for generating the output of a single trajectory, the (optional) `Progress` object, and the (optional) `RemoteChannel` object.
+- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref).
+- `progress_bar`: Whether to show the progress bar. Using non-`Val` types might lead to type instabilities.
+- `keep_runs_results`: Whether to save the results of each trajectory. Default to `Val(false)`. Use `Val(true)` together with [`std_expect`](@ref) to inspect the trajectory spread.
+- `store_measurement`: Not supported by DO-QSD, see [`doqsdsolveProblem`](@ref).
+- `kwargs`: The keyword arguments for the ODEProblem.
+
+# Notes
+
+- The states will be saved depend on the keyword argument `saveat` in `kwargs`.
+- If `e_ops` is empty, the default value of `saveat=tlist` (saving the states corresponding to `tlist`), otherwise, `saveat=[tlist[end]]` (only save the final state). You can also specify `e_ops` and `saveat` separately.
+- The default tolerances in `kwargs` are given as `reltol=2e-3` and `abstol=1e-3`.
+- The optimality is local in time, and only concerns `op_target`: other observables can be noisier than with [`ssesolve`](@ref).
+- If ``\mathcal{L}^\dagger(\hat{O}) = \lambda \hat{O} + c \hat{I}``, then every single trajectory satisfies the deterministic equation ``d\langle \hat{O} \rangle_\psi = (\lambda \langle \hat{O} \rangle_\psi + c) dt``.
+- For more details about `alg` please refer to [`DifferentialEquations.jl` (SDE Solvers)](https://docs.sciml.ai/DiffEqDocs/stable/solvers/sde_solve/)
+- For more details about `kwargs` please refer to [`DifferentialEquations.jl` (Keyword Arguments)](https://docs.sciml.ai/DiffEqDocs/stable/basics/common_solver_opts/)
+
+!!! tip "Performance Tip"
+    When `sc_ops` contains only a single operator, it is recommended to pass only that operator as the argument. This ensures that the stochastic noise is diagonal, making the simulation faster.
+
+# Returns
+
+- `sol::TimeEvolutionStochasticSol`: The solution of the time evolution. See [`TimeEvolutionStochasticSol`](@ref).
+"""
+function doqsdsolve(
+        H::Union{AbstractQuantumObject{Operator}, Tuple},
+        ψ0::QuantumObject{Ket},
+        tlist::AbstractVector,
+        sc_ops::Union{Nothing, AbstractVector, Tuple, AbstractQuantumObject},
+        op_target::QuantumObject{Operator};
+        alg::Union{Nothing, AbstractSDEAlgorithm} = nothing,
+        e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
+        params = NullParameters(),
+        rng::AbstractRNG = default_rng(),
+        ntraj::Int = 500,
+        ensemblealg::EnsembleAlgorithm = EnsembleThreads(),
+        prob_func::Union{Function, Nothing} = nothing,
+        output_func::Union{Tuple, Nothing} = nothing,
+        phase_atol::Union{Nothing, Real} = nothing,
+        progress_bar::Union{Val, Bool} = Val(true),
+        keep_runs_results::Union{Val, Bool} = Val(false),
+        store_measurement::Union{Val, Bool} = Val(false),
+        kwargs...,
+    )
+    ens_prob = doqsdsolveEnsembleProblem(
+        H,
+        ψ0,
+        tlist,
+        sc_ops,
+        op_target;
+        e_ops = e_ops,
+        params = params,
+        rng = rng,
+        ntraj = ntraj,
+        ensemblealg = ensemblealg,
+        prob_func = prob_func,
+        output_func = output_func,
+        phase_atol = phase_atol,
+        progress_bar = progress_bar,
+        store_measurement = makeVal(store_measurement),
+        kwargs...,
+    )
+
+    sc_ops_isa_Qobj = sc_ops isa AbstractQuantumObject # We can avoid using non-diagonal noise if sc_ops is just an AbstractQuantumObject
+
+    if isnothing(alg)
+        alg = sc_ops_isa_Qobj ? SRIW1() : SRA2()
+    end
+
+    return doqsdsolve(ens_prob, alg, ntraj, ensemblealg, makeVal(keep_runs_results))
+end
+
+# the solution is assembled exactly as for `ssesolve`, since both solvers store the
+# expectation values with `SaveFuncSSESolve`
+doqsdsolve(
+    ens_prob::TimeEvolutionProblem,
+    alg::AbstractSDEAlgorithm = SRA2(),
+    ntraj::Int = 500,
+    ensemblealg::EnsembleAlgorithm = EnsembleThreads(),
+    keep_runs_results = Val(false),
+) = ssesolve(ens_prob, alg, ntraj, ensemblealg, keep_runs_results)

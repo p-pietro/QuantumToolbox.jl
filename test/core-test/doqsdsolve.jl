@@ -131,6 +131,16 @@ end
     @test_throws DimensionMismatch doqsdsolveProblem(
         H, ψ0, tlist, sc_op, destroy(N + 1)' * destroy(N + 1), progress_bar = Val(false),
     )
+    # a negative `phase_atol` would silently poison the trajectory with a `NaN` phase
+    @test_throws ArgumentError doqsdsolveProblem(
+        H, ψ0, tlist, sc_op, op_target, phase_atol = -1.0e-6, progress_bar = Val(false),
+    )
+    # the `store_measurement = Val(true)` rejection must survive the three-hop forwarding
+    # through the ensemble constructor
+    @test_throws ArgumentError doqsdsolve(
+        H, ψ0, tlist, sc_op, op_target;
+        store_measurement = Val(true), ntraj = 1, progress_bar = Val(false),
+    )
 end
 
 @testitem "doqsdsolve: deterministic target observable" begin
@@ -151,7 +161,8 @@ end
     z0 = real(expect(op_target, ψ0))
     analytic = @. -1 + (z0 + 1) * exp(-γ * tlist)
 
-    # `qeye(2)` is used to divide out the (tiny) norm drift of the interpolated states
+    # `qeye(2)` is a harmless safeguard against the (tiny) residual norm error of the
+    # returned states, not a correction for interpolation
     e_ops = [op_target, qeye(2)]
     # 1.0e-6 is deliberate: it keeps the worst deviation from the analytic curve around
     # 1.0e-6, two orders below the assertions below, while 1.0e-8 makes this item take
@@ -176,8 +187,11 @@ end
     @test maximum(abs, std_expect(sol)[1, :]) < 1.0e-4
     @test maximum(abs, std_expect(sol_sse)[1, :]) > 0.05
 
-    # the exact SDE preserves ‖ψ‖: monitor the numerical norm error
-    @test maximum(abs, real.(sol.expect[2, :, :]) .- 1) < 1.0e-3
+    # the exact SDE preserves ‖ψ‖: monitor the numerical norm error. With `tstops = tlist`
+    # forced (FIX 1), `sol.expect[2, :, :]` is `⟨qeye(2)⟩` at real, normalized step-end
+    # states, so this is now floating-point noise rather than interpolation drift:
+    # measured 4.4e-16, i.e. a couple of ULPs.
+    @test maximum(abs, real.(sol.expect[2, :, :]) .- 1) < 1.0e-12
 
     # starting from |e> puts the first step exactly on the phase singularity C = 0, where
     # the deterministic fallback u = 1 is used: the deterministic law must still hold
@@ -240,6 +254,7 @@ end
 
     # the trajectory average reproduces the master equation for both observables
     avg = average_expect(sol)
+    # measured 2.3e-4
     @test sum(abs, real(avg[1, :] .- sol_me.expect[1, :])) / length(tlist) < 0.02
     # measured 0.0346; 0.06 keeps CI headroom without weakening the check, since a broken unraveling would be off by ~1
     @test sum(abs, real(avg[2, :] .- sol_me.expect[2, :])) / length(tlist) < 0.06
@@ -248,12 +263,15 @@ end
     z0 = real(expect(op_target, ψ0))
     z_ss = (nth - 1) / (1 + nth)
     analytic = @. z_ss + (z0 - z_ss) * exp(-γ * (1 + nth) * tlist)
+    # measured 2.3e-4
     @test sum(abs, real(avg[1, :]) .- analytic) / length(tlist) < 0.02
 
     # variance reduction: essentially zero for the target, sizeable for the fixed phase
     std_doqsd = maximum(abs, std_expect(sol)[1, :])
     std_sse = maximum(abs, std_expect(sol_sse)[1, :])
+    # measured ratio 0.015 (std_doqsd/std_sse), far below the 0.2 threshold
     @test std_doqsd < 0.2 * std_sse
+    # measured 0.484
     @test std_sse > 0.05
 end
 
@@ -261,17 +279,11 @@ end
     using LinearAlgebra
     using Random
 
-    # `phase_atol = Inf` makes `|C_n| > atol` false everywhere, so u_n ≡ 1. In the
-    # adaptive-homodyne gauge that is exactly the fixed-phase unraveling integrated by
-    # `ssesolve` (x_n = Re<S_n> = e_n/2), so both solvers must give the same trajectories.
-    # Fixed steps AND matched `tstops` are both required for the two solvers to be driven
-    # along the same Brownian path and thus be comparable trajectory by trajectory:
-    # `ssesolve` always forces `tstops = tlist` (its `isconstant(K)` is never true, since K
-    # carries state-dependent ScalarOperators), while `doqsdsolve` deliberately skips them
-    # for a time-independent H. Mismatched `tstops` change where the noise process is
-    # sampled, and `DiffEqNoiseProcess.jl`'s Brownian bridge fills in a different path:
-    # measured max|Δexpect| = 4.2e-2 without matched tstops, 2.5e-8 with them, on this same
-    # grid.
+    # Fixed steps are required: with adaptive stepping the two solvers accept different
+    # steps and therefore sample different Brownian paths. Both solvers now force
+    # `tstops = tlist` internally, which makes the trajectory-by-trajectory comparison
+    # meaningful for all of them — while with mismatched tstops, the measured difference
+    # was 4.2e-2 instead of 2.5e-8.
     N = 4
     a = destroy(N)
     H = a' * a + 0.3 * (a + a')
@@ -282,7 +294,7 @@ end
     e_ops = [op_target, a + a', qeye(N)]
     opts = (
         e_ops = e_ops, ntraj = 6, progress_bar = Val(false), keep_runs_results = Val(true),
-        adaptive = false, dt = 1.0e-4, tstops = collect(tlist),
+        adaptive = false, dt = 1.0e-4,
     )
 
     sol_frozen = doqsdsolve(
@@ -327,11 +339,15 @@ end
     sol = doqsdsolve(H, ψ0, tlist, sc_op, op_target; rng = MersenneTwister(11), opts...)
     sol_sse = ssesolve(H, ψ0, tlist, sc_op; rng = MersenneTwister(11), opts...)
 
+    # measured 4.7e-4
     @test sum(abs, real(average_expect(sol)[1, :] .- sol_me.expect[1, :])) / length(tlist) < 0.05
+    # measured 2.2e-3
     @test sum(abs, real(average_expect(sol_sse)[1, :] .- sol_me.expect[1, :])) / length(tlist) < 0.15
 
     std_doqsd = mean(abs, std_expect(sol)[1, :])
     std_sse = mean(abs, std_expect(sol_sse)[1, :])
+    # measured ratio 0.45 (std_doqsd/std_sse): real headroom below the 0.6 threshold, not one
+    # tuned until green
     @test std_doqsd < 0.6 * std_sse
 end
 

@@ -49,6 +49,7 @@ The following table lists the solvers provided by `QuantumToolbox` for dynamic q
 | Monte Carlo evolution | [`mcsolve`](@ref) | [`mcsolveProblem`](@ref) [`mcsolveEnsembleProblem`](@ref) | [`TimeEvolutionMCSol`](@ref) |
 | Stochastic Schrödinger equation | [`ssesolve`](@ref) | [`ssesolveProblem`](@ref) [`ssesolveEnsembleProblem`](@ref) | [`TimeEvolutionStochasticSol`](@ref) |
 | Stochastic master equation | [`smesolve`](@ref) | [`smesolveProblem`](@ref) [`smesolveEnsembleProblem`](@ref) | [`TimeEvolutionStochasticSol`](@ref) |
+| Dynamically optimal quantum state diffusion | [`doqsdsolve`](@ref) | [`doqsdsolveProblem`](@ref) [`doqsdsolveEnsembleProblem`](@ref) | [`TimeEvolutionStochasticSol`](@ref) |
 | Bloch-Redfield master equation | [`brmesolve`](@ref) | - | [`TimeEvolutionSol`](@ref) |
 
 !!! note "Solving dynamics with pre-defined problems"

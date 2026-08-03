@@ -99,7 +99,7 @@ function (L::DOQSDDiffusionOperator)(w, v, p, t)
     Nc = length(L.sc_ops)
     M = length(v)
     S = (size(w, 1), size(w, 2)) # supports also `w` as a `Vector`
-    (S[1] == M && S[2] == Nc) || throw(DimensionMismatch("The size of the output matrix is incorrect."))
+    (S[1] == M && S[2] == Nc) || throw(DimensionMismatch("The size of the output vector is incorrect."))
 
     n = real(dot(v, v))
     Oψ = L.cache_O
@@ -169,11 +169,11 @@ Above, ``\hat{S}_n`` are the stochastic collapse operators and ``dW_n(t)`` is th
 - `ψ0`: Initial state of the system ``|\psi(0)\rangle``.
 - `tlist`: List of time points at which to save either the state or the expectation values of the system.
 - `sc_ops`: List of stochastic collapse operators ``\{\hat{S}_n\}_n``. It can be either a `Vector`, a `Tuple` or a [`AbstractQuantumObject`](@ref). It is recommended to use the last case when only one operator is provided. They must be time-independent.
-- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent.
+- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent. The check is exact, so an observable assembled by floating-point arithmetic may need symmetrizing (for example ``(\hat{O} + \hat{O}^\dagger)/2``) before it is accepted.
 - `e_ops`: List of operators for which to calculate expectation values. It can be either a `Vector` or a `Tuple`.
 - `params`: `NullParameters` of parameters to pass to the solver.
 - `rng`: Random number generator for reproducibility.
-- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref).
+- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref). The threshold is absolute, while ``|C_n|`` scales like ``\|\hat{O}\|\,\|\hat{S}_n\|``, so scale it accordingly for operators far from unit norm.
 - `progress_bar`: Whether to show the progress bar. Using non-`Val` types might lead to type instabilities.
 - `store_measurement`: Not supported by DO-QSD, see the notes below.
 - `kwargs`: The keyword arguments for the ODEProblem.
@@ -183,13 +183,13 @@ Above, ``\hat{S}_n`` are the stochastic collapse operators and ``dW_n(t)`` is th
 - The states will be saved depend on the keyword argument `saveat` in `kwargs`.
 - If `e_ops` is empty, the default value of `saveat=tlist` (saving the states corresponding to `tlist`), otherwise, `saveat=[tlist[end]]` (only save the final state). You can also specify `e_ops` and `saveat` separately.
 - The default tolerances in `kwargs` are given as `reltol=2e-3` and `abstol=1e-3`.
-
-!!! warning "Use fixed steps with more than one collapse operator"
-    With non-diagonal noise the default algorithm chosen by [`doqsdsolve`](@ref) is `SRA2()`, which is formally an additive-noise method, and its adaptive step-size control frequently fails here. The adaptive phase rotates with ``\arg(C_n)``, so wherever ``|C_n|`` is small the diffusion becomes an almost discontinuous function of the state: the error estimate then stops shrinking with the step size and the integration aborts with `dt_min_unstable`. Measured on a driven cavity with two collapse operators, 15 of 20 trajectories abort, against roughly 1 in 20 for [`ssesolve`](@ref) on the same system; a two-channel qubit loses about 20% of its trajectories in *both* solvers. Integrate with fixed steps (`adaptive = false` together with a suitable `dt`) or supply an `alg` intended for non-diagonal multiplicative noise. Raising `phase_atol` also stabilizes the integration, but only at values large enough to suppress the adaptive phase itself, which defeats the purpose of this solver. A single collapse operator gives diagonal noise, uses `SRIW1()`, and is not affected.
-
 - `store_measurement = Val(true)` is not supported: the DO-QSD measurement record ``dY_n = 2 \mathrm{Re}(u_n \ell_n) dt + dW_n`` depends on the adaptive phases, hence on the state, while the measurement callback only handles fixed operators. Use [`ssesolve`](@ref) for a fixed-phase homodyne record.
 - The optimality is local in time: it minimizes the instantaneous growth of the variance of ``\langle \hat{O} \rangle_\psi``, and is not a proof of minimal variance at a prescribed final time. The observable can still acquire trajectory variance, because its drift depends on the stochastic state.
 - For more details about `kwargs` please refer to [`DifferentialEquations.jl` (Keyword Arguments)](https://docs.sciml.ai/DiffEqDocs/stable/basics/common_solver_opts/)
+- The unraveling preserves ``\|\psi\|`` exactly in the continuum limit, but the integrator does not: the returned states are never renormalized, and their norm deviates from 1 by roughly the requested tolerance. Apply [`normalize`](@ref) before using the returned state, or supply `e_ops` to read expectation values, which are computed at the normalized step-end states.
+
+!!! warning "Use fixed steps with more than one collapse operator"
+    With non-diagonal noise the default algorithm chosen by [`doqsdsolve`](@ref) is `SRA2()`, which is formally an additive-noise method, and its adaptive step-size control frequently fails here. The adaptive phase rotates with ``\arg(C_n)``, so wherever ``|C_n|`` is small the diffusion becomes an almost discontinuous function of the state: the error estimate then stops shrinking with the step size and the integration aborts with `dt_min_unstable`. Measured on a driven cavity with two collapse operators, 15 of 20 trajectories abort, against roughly 1 in 20 for [`ssesolve`](@ref) on the same system; a two-channel qubit loses about 20% of its trajectories in *both* solvers. Integrate with fixed steps (`adaptive = false` together with a suitable `dt`) or supply an `alg` intended for non-diagonal multiplicative noise. Raising `phase_atol` also stabilizes the integration, but only at values large enough to suppress the adaptive phase itself, which defeats the purpose of this solver. A single collapse operator gives diagonal noise, uses `SRIW1()`, and is not affected. Aborted trajectories still occupy their rows in the pre-allocated expectation-value buffer, so `average_expect` and `std_expect` will silently mix in uninitialized data: check `sol.converged` before trusting an ensemble average. Setting `dtmin = 0` also largely avoids the aborts (measured 1 in 20 instead of 15 in 20), at the cost of letting the step size crawl instead of failing fast.
 
 !!! tip "Performance Tip"
     When `sc_ops` contains only a single operator, it is recommended to pass only that operator as the argument. This ensures that the stochastic noise is diagonal, making the simulation faster.
@@ -232,6 +232,11 @@ function doqsdsolveProblem(
         throw(ArgumentError("Time-dependent stochastic collapse operators are not supported in doqsdsolve."))
     ishermitian(op_target) || throw(ArgumentError("The target operator must be Hermitian."))
 
+    # a negative `phase_atol` would make `abs(C) > atol` true even at `C = 0`, silently
+    # poisoning the trajectory with `im * conj(0) / 0 == NaN`
+    (phase_atol isa Nothing || phase_atol >= 0) ||
+        throw(ArgumentError("The keyword argument \"phase_atol\" must be non-negative, got $phase_atol."))
+
     H_eff_evo = _mcsolve_make_Heff_QobjEvo(H, sc_ops_list)
     isoper(H_eff_evo) || throw(ArgumentError("The Hamiltonian must be an Operator."))
     check_dimensions(H_eff_evo, op_target)
@@ -252,7 +257,13 @@ function doqsdsolveProblem(
     tlist = _check_tlist(tlist, _float_type(T))
 
     kwargs2 = _merge_saveat(tlist, e_ops, default_sde_solver_options(T); kwargs...)
-    kwargs3 = _merge_tstops(kwargs2, isconstant(H_eff_evo), tlist)
+    # `false`, not `isconstant(H_eff_evo)`: without forced `tstops = tlist` the save
+    # callback evaluates `e_ops` on the SDE interpolant, which the norm-stabilizing
+    # callback never touches, so `saveat` states are interpolated too. Measured bias at
+    # the default tolerances: 1.7e-3 in `‖ψ‖²` and 1.75e-3 in `⟨σz⟩` — a larger `abstol`
+    # that is not averaged away by more trajectories. `ssesolve`/`smesolve` force tstops
+    # for the same reason.
+    kwargs3 = _merge_tstops(kwargs2, false, tlist)
     kwargs4 = _generate_stochastic_kwargs(
         e_ops,
         sc_ops_list,
@@ -309,7 +320,7 @@ Generate the SDE `EnsembleProblem` for the dynamically optimal quantum state dif
 - `ψ0`: Initial state of the system ``|\psi(0)\rangle``.
 - `tlist`: List of time points at which to save either the state or the expectation values of the system.
 - `sc_ops`: List of stochastic collapse operators ``\{\hat{S}_n\}_n``. It can be either a `Vector`, a `Tuple` or a [`AbstractQuantumObject`](@ref). It is recommended to use the last case when only one operator is provided. They must be time-independent.
-- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent.
+- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent. The check is exact, so an observable assembled by floating-point arithmetic may need symmetrizing (for example ``(\hat{O} + \hat{O}^\dagger)/2``) before it is accepted.
 - `e_ops`: List of operators for which to calculate expectation values. It can be either a `Vector` or a `Tuple`.
 - `params`: `NullParameters` of parameters to pass to the solver.
 - `rng`: Random number generator for reproducibility.
@@ -317,7 +328,7 @@ Generate the SDE `EnsembleProblem` for the dynamically optimal quantum state dif
 - `ensemblealg`: Ensemble method to use. Default to `EnsembleThreads()`.
 - `prob_func`: Function to use for generating the SDEProblem.
 - `output_func`: a `Tuple` containing the `Function` to use for generating the output of a single trajectory, the (optional) `Progress` object, and the (optional) `RemoteChannel` object.
-- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref).
+- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref). The threshold is absolute, while ``|C_n|`` scales like ``\|\hat{O}\|\,\|\hat{S}_n\|``, so scale it accordingly for operators far from unit norm.
 - `progress_bar`: Whether to show the progress bar. Using non-`Val` types might lead to type instabilities.
 - `store_measurement`: Not supported by DO-QSD, see [`doqsdsolveProblem`](@ref).
 - `kwargs`: The keyword arguments for the ODEProblem.
@@ -328,6 +339,10 @@ Generate the SDE `EnsembleProblem` for the dynamically optimal quantum state dif
 - If `e_ops` is empty, the default value of `saveat=tlist` (saving the states corresponding to `tlist`), otherwise, `saveat=[tlist[end]]` (only save the final state). You can also specify `e_ops` and `saveat` separately.
 - The default tolerances in `kwargs` are given as `reltol=2e-3` and `abstol=1e-3`.
 - For more details about `kwargs` please refer to [`DifferentialEquations.jl` (Keyword Arguments)](https://docs.sciml.ai/DiffEqDocs/stable/basics/common_solver_opts/)
+- The unraveling preserves ``\|\psi\|`` exactly in the continuum limit, but the integrator does not: the returned states are never renormalized, and their norm deviates from 1 by roughly the requested tolerance. Apply [`normalize`](@ref) before using the returned state, or supply `e_ops` to read expectation values, which are computed at the normalized step-end states.
+
+!!! warning "Use fixed steps with more than one collapse operator"
+    With non-diagonal noise (`sc_ops` given as a `Vector` or `Tuple`) the default algorithm is `SRA2()`, formally an additive-noise method, and its adaptive step-size control frequently fails here. The adaptive phase rotates with ``\arg(C_n)``, so wherever ``|C_n|`` is small the diffusion becomes an almost discontinuous function of the state: the error estimate then stops shrinking with the step size and the integration aborts with `dt_min_unstable`. Measured on a driven cavity with two collapse operators, 15 of 20 trajectories abort, against roughly 1 in 20 for [`ssesolve`](@ref) on the same system; a two-channel qubit loses about 20% of its trajectories in *both* solvers. Integrate with fixed steps (`adaptive = false` together with a suitable `dt`) or supply an `alg` intended for non-diagonal multiplicative noise. Raising `phase_atol` also stabilizes the integration, but only at values large enough to suppress the adaptive phase itself, which defeats the purpose of this solver. A single collapse operator gives diagonal noise, uses `SRIW1()`, and is not affected. Aborted trajectories still occupy their rows in the pre-allocated expectation-value buffer, so `average_expect` and `std_expect` will silently mix in uninitialized data: check `sol.converged` before trusting an ensemble average. Setting `dtmin = 0` also largely avoids the aborts (measured 1 in 20 instead of 15 in 20), at the cost of letting the step size crawl instead of failing fast.
 
 !!! tip "Performance Tip"
     When `sc_ops` contains only a single operator, it is recommended to pass only that operator as the argument. This ensures that the stochastic noise is diagonal, making the simulation faster.
@@ -442,7 +457,7 @@ Because ``\mathrm{Re}(u_n C_n) = 0``, the target observable follows ``d\langle \
 - `ψ0`: Initial state of the system ``|\psi(0)\rangle``.
 - `tlist`: List of time points at which to save either the state or the expectation values of the system.
 - `sc_ops`: List of stochastic collapse operators ``\{\hat{S}_n\}_n``. It can be either a `Vector`, a `Tuple` or a [`AbstractQuantumObject`](@ref). It is recommended to use the last case when only one operator is provided. They must be time-independent.
-- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent.
+- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent. The check is exact, so an observable assembled by floating-point arithmetic may need symmetrizing (for example ``(\hat{O} + \hat{O}^\dagger)/2``) before it is accepted.
 - `alg`: The algorithm to use for the stochastic differential equation. Default is `SRIW1()` if `sc_ops` is an [`AbstractQuantumObject`](@ref) (diagonal noise), and `SRA2()` otherwise (non-diagonal noise).
 - `e_ops`: List of operators for which to calculate expectation values. It can be either a `Vector` or a `Tuple`.
 - `params`: `NullParameters` of parameters to pass to the solver.
@@ -451,7 +466,7 @@ Because ``\mathrm{Re}(u_n C_n) = 0``, the target observable follows ``d\langle \
 - `ensemblealg`: Ensemble method to use. Default to `EnsembleThreads()`.
 - `prob_func`: Function to use for generating the SDEProblem.
 - `output_func`: a `Tuple` containing the `Function` to use for generating the output of a single trajectory, the (optional) `Progress` object, and the (optional) `RemoteChannel` object.
-- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref).
+- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref). The threshold is absolute, while ``|C_n|`` scales like ``\|\hat{O}\|\,\|\hat{S}_n\|``, so scale it accordingly for operators far from unit norm.
 - `progress_bar`: Whether to show the progress bar. Using non-`Val` types might lead to type instabilities.
 - `keep_runs_results`: Whether to save the results of each trajectory. Default to `Val(false)`. Use `Val(true)` together with [`std_expect`](@ref) to inspect the trajectory spread.
 - `store_measurement`: Not supported by DO-QSD, see [`doqsdsolveProblem`](@ref).
@@ -462,14 +477,14 @@ Because ``\mathrm{Re}(u_n C_n) = 0``, the target observable follows ``d\langle \
 - The states will be saved depend on the keyword argument `saveat` in `kwargs`.
 - If `e_ops` is empty, the default value of `saveat=tlist` (saving the states corresponding to `tlist`), otherwise, `saveat=[tlist[end]]` (only save the final state). You can also specify `e_ops` and `saveat` separately.
 - The default tolerances in `kwargs` are given as `reltol=2e-3` and `abstol=1e-3`.
-
-!!! warning "Use fixed steps with more than one collapse operator"
-    With non-diagonal noise (`sc_ops` given as a `Vector` or `Tuple`) the default algorithm is `SRA2()`, formally an additive-noise method, and its adaptive step-size control frequently fails here. The adaptive phase rotates with ``\arg(C_n)``, so wherever ``|C_n|`` is small the diffusion becomes an almost discontinuous function of the state: the error estimate then stops shrinking with the step size and the integration aborts with `dt_min_unstable`. Measured on a driven cavity with two collapse operators, 15 of 20 trajectories abort, against roughly 1 in 20 for [`ssesolve`](@ref) on the same system; a two-channel qubit loses about 20% of its trajectories in *both* solvers. Integrate with fixed steps (`adaptive = false` together with a suitable `dt`) or supply an `alg` intended for non-diagonal multiplicative noise. Raising `phase_atol` also stabilizes the integration, but only at values large enough to suppress the adaptive phase itself, which defeats the purpose of this solver. A single collapse operator gives diagonal noise, uses `SRIW1()`, and is not affected.
-
 - The optimality is local in time, and only concerns `op_target`: other observables can be noisier than with [`ssesolve`](@ref).
 - If ``\mathcal{L}^\dagger(\hat{O}) = \lambda \hat{O} + c \hat{I}``, then every single trajectory satisfies the deterministic equation ``d\langle \hat{O} \rangle_\psi = (\lambda \langle \hat{O} \rangle_\psi + c) dt``.
 - For more details about `alg` please refer to [`DifferentialEquations.jl` (SDE Solvers)](https://docs.sciml.ai/DiffEqDocs/stable/solvers/sde_solve/)
 - For more details about `kwargs` please refer to [`DifferentialEquations.jl` (Keyword Arguments)](https://docs.sciml.ai/DiffEqDocs/stable/basics/common_solver_opts/)
+- The unraveling preserves ``\|\psi\|`` exactly in the continuum limit, but the integrator does not: the returned states are never renormalized, and their norm deviates from 1 by roughly the requested tolerance. Apply [`normalize`](@ref) before using the returned state, or supply `e_ops` to read expectation values, which are computed at the normalized step-end states.
+
+!!! warning "Use fixed steps with more than one collapse operator"
+    With non-diagonal noise (`sc_ops` given as a `Vector` or `Tuple`) the default algorithm is `SRA2()`, formally an additive-noise method, and its adaptive step-size control frequently fails here. The adaptive phase rotates with ``\arg(C_n)``, so wherever ``|C_n|`` is small the diffusion becomes an almost discontinuous function of the state: the error estimate then stops shrinking with the step size and the integration aborts with `dt_min_unstable`. Measured on a driven cavity with two collapse operators, 15 of 20 trajectories abort, against roughly 1 in 20 for [`ssesolve`](@ref) on the same system; a two-channel qubit loses about 20% of its trajectories in *both* solvers. Integrate with fixed steps (`adaptive = false` together with a suitable `dt`) or supply an `alg` intended for non-diagonal multiplicative noise. Raising `phase_atol` also stabilizes the integration, but only at values large enough to suppress the adaptive phase itself, which defeats the purpose of this solver. A single collapse operator gives diagonal noise, uses `SRIW1()`, and is not affected. Aborted trajectories still occupy their rows in the pre-allocated expectation-value buffer, so `average_expect` and `std_expect` will silently mix in uninitialized data: check `sol.converged` before trusting an ensemble average. Setting `dtmin = 0` also largely avoids the aborts (measured 1 in 20 instead of 15 in 20), at the cost of letting the step size crawl instead of failing fast.
 
 !!! tip "Performance Tip"
     When `sc_ops` contains only a single operator, it is recommended to pass only that operator as the argument. This ensures that the stochastic noise is diagonal, making the simulation faster.

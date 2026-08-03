@@ -247,11 +247,14 @@ ssesolveProblem
 ssesolveEnsembleProblem
 smesolveProblem
 smesolveEnsembleProblem
+doqsdsolveProblem
+doqsdsolveEnsembleProblem
 sesolve
 mesolve
 mcsolve
 ssesolve
 smesolve
+doqsdsolve
 sesolve_map
 mesolve_map
 dfd_mesolve

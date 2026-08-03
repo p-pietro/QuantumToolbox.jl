@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased](https://github.com/qutip/QuantumToolbox.jl/tree/main)
 
 - [lib] Introduce `QuantumToolboxCore` library. ([#686])
+- Add `doqsdsolve`, `doqsdsolveProblem` and `doqsdsolveEnsembleProblem`, implementing the dynamically optimal quantum state diffusion unraveling: the measurement phase of every stochastic collapse operator is adapted to the current state so that the trajectory noise of a chosen Hermitian target observable cancels instantaneously, which strongly reduces the number of trajectories needed to resolve it.
 
 ## [v0.47.3]
 Release date: 2026-07-28

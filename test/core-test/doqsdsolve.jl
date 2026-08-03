@@ -265,8 +265,14 @@ end
     # `phase_atol = Inf` makes `|C_n| > atol` false everywhere, so u_n ≡ 1. In the
     # adaptive-homodyne gauge that is exactly the fixed-phase unraveling integrated by
     # `ssesolve` (x_n = Re<S_n> = e_n/2), so both solvers must give the same trajectories.
-    # Fixed steps are required: with adaptive stepping the two solvers accept different
-    # steps and therefore sample different Brownian paths.
+    # Fixed steps AND matched `tstops` are both required for the two solvers to be driven
+    # along the same Brownian path and thus be comparable trajectory by trajectory:
+    # `ssesolve` always forces `tstops = tlist` (its `isconstant(K)` is never true, since K
+    # carries state-dependent ScalarOperators), while `doqsdsolve` deliberately skips them
+    # for a time-independent H. Mismatched `tstops` change where the noise process is
+    # sampled, and `DiffEqNoiseProcess.jl`'s Brownian bridge fills in a different path:
+    # measured max|Δexpect| = 4.2e-2 without matched tstops, 2.5e-8 with them, on this same
+    # grid.
     N = 4
     a = destroy(N)
     H = a' * a + 0.3 * (a + a')
@@ -277,7 +283,7 @@ end
     e_ops = [op_target, a + a', qeye(N)]
     opts = (
         e_ops = e_ops, ntraj = 6, progress_bar = Val(false), keep_runs_results = Val(true),
-        adaptive = false, dt = 1.0e-4,
+        adaptive = false, dt = 1.0e-4, tstops = collect(tlist),
     )
 
     sol_frozen = doqsdsolve(
@@ -286,10 +292,13 @@ end
     )
     sol_sse = ssesolve(H, ψ0, tlist, sc_op; rng = MersenneTwister(19), opts...)
 
-    # 1.0e-3 is too tight: even at fixed steps the two solvers' trajectories separate over
-    # 5000 steps because of the normalize!(u) vs. norm-invariant-ratio difference described
-    # above. Measured maximum(abs, sol_frozen.expect .- sol_sse.expect) = 0.0423; relaxed to
-    # (measured value) * 3 ≈ 0.13. This is not the O(1) disagreement that would signal a
-    # wrong gauge or a dropped x_n.
-    @test sol_frozen.expect ≈ sol_sse.expect atol = 0.13
+    # measured 2.5e-8; the residual comes from `ssesolve` calling `normalize!` on the
+    # integrator state inside the coefficient update, where doqsdsolve uses norm-invariant
+    # ratios instead.
+    @test sol_frozen.expect ≈ sol_sse.expect atol = 1.0e-6
+
+    # control: the agreement above is specific to the frozen phase, not because the two
+    # solvers are trivially equal. With the adaptive phase, measured difference is 1.78.
+    sol_adaptive = doqsdsolve(H, ψ0, tlist, sc_op, op_target; rng = MersenneTwister(19), opts...)
+    @test maximum(abs, sol_adaptive.expect .- sol_sse.expect) > 0.1
 end

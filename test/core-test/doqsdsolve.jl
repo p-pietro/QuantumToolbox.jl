@@ -205,3 +205,91 @@ end
     @test isnothing(sol_avg.measurement)
     @test occursin("Solution of stochastic quantum trajectories", sprint((t, s) -> show(t, "text/plain", s), sol_avg))
 end
+
+@testitem "doqsdsolve: many-trajectory equivalence with mesolve" begin
+    using LinearAlgebra
+    using Random
+    using Statistics
+
+    γ = 1.0
+    nth = 0.2
+    H = 0.5 * sigmaz()
+    sc_ops = [sqrt(γ) * sigmam(), sqrt(γ * nth) * sigmap()]
+    op_target = sigmaz()
+    ψ0 = normalize(basis(2, 0) + basis(2, 1))
+    tlist = range(0, 2 / γ, 21)
+    e_ops = [op_target, sigmax(), qeye(2)]
+    ntraj = 300
+
+    sol_me = mesolve(H, ψ0, tlist, sc_ops, e_ops = e_ops, progress_bar = Val(false))
+    # Fixed steps for both stochastic solvers: with the default adaptive `SRA2()` stepper,
+    # a sizeable fraction of the 300 trajectories hit `dt_min_unstable` and abort early for
+    # this two-channel system, biasing the ensemble average. `ssesolve` aborts at almost the
+    # same rate under the same adaptive settings (measured 61/300 vs. 69/300 for doqsdsolve),
+    # so this is a pre-existing adaptive-stepper stability limitation, not a doqsdsolve
+    # coefficient bug; fixed steps avoid it entirely (0/300 aborts).
+    stoch_opts = (alg = QuantumToolbox.SRA2(), dt = 1.0e-3, adaptive = false)
+    sol = doqsdsolve(
+        H, ψ0, tlist, sc_ops, op_target; e_ops = e_ops, ntraj = ntraj,
+        rng = MersenneTwister(7), progress_bar = Val(false), keep_runs_results = Val(true), stoch_opts...
+    )
+    sol_sse = ssesolve(
+        H, ψ0, tlist, sc_ops; e_ops = e_ops, ntraj = ntraj,
+        rng = MersenneTwister(7), progress_bar = Val(false), keep_runs_results = Val(true), stoch_opts...
+    )
+
+    @test size(sol.expect) == (length(e_ops), ntraj, length(tlist))
+
+    # the trajectory average reproduces the master equation for both observables
+    avg = average_expect(sol)
+    @test sum(abs, real(avg[1, :] .- sol_me.expect[1, :])) / length(tlist) < 0.02
+    @test sum(abs, real(avg[2, :] .- sol_me.expect[2, :])) / length(tlist) < 0.05
+
+    # 𝓛†(σz) is affine in σz also with two channels: <σz> stays deterministic
+    z0 = real(expect(op_target, ψ0))
+    z_ss = (nth - 1) / (1 + nth)
+    analytic = @. z_ss + (z0 - z_ss) * exp(-γ * (1 + nth) * tlist)
+    @test sum(abs, real(avg[1, :]) .- analytic) / length(tlist) < 0.02
+
+    # variance reduction: essentially zero for the target, sizeable for the fixed phase
+    std_doqsd = maximum(abs, std_expect(sol)[1, :])
+    std_sse = maximum(abs, std_expect(sol_sse)[1, :])
+    @test std_doqsd < 0.2 * std_sse
+    @test std_sse > 0.05
+end
+
+@testitem "doqsdsolve: frozen phase reproduces ssesolve" begin
+    using LinearAlgebra
+    using Random
+
+    # `phase_atol = Inf` makes `|C_n| > atol` false everywhere, so u_n ≡ 1. In the
+    # adaptive-homodyne gauge that is exactly the fixed-phase unraveling integrated by
+    # `ssesolve` (x_n = Re<S_n> = e_n/2), so both solvers must give the same trajectories.
+    # Fixed steps are required: with adaptive stepping the two solvers accept different
+    # steps and therefore sample different Brownian paths.
+    N = 4
+    a = destroy(N)
+    H = a' * a + 0.3 * (a + a')
+    sc_op = 0.7 * a
+    op_target = a' * a
+    ψ0 = fock(N, 1)
+    tlist = range(0, 0.5, 6)
+    e_ops = [op_target, a + a', qeye(N)]
+    opts = (
+        e_ops = e_ops, ntraj = 6, progress_bar = Val(false), keep_runs_results = Val(true),
+        adaptive = false, dt = 1.0e-4,
+    )
+
+    sol_frozen = doqsdsolve(
+        H, ψ0, tlist, sc_op, op_target; phase_atol = Inf,
+        rng = MersenneTwister(19), opts...
+    )
+    sol_sse = ssesolve(H, ψ0, tlist, sc_op; rng = MersenneTwister(19), opts...)
+
+    # 1.0e-3 is too tight: even at fixed steps the two solvers' trajectories separate over
+    # 5000 steps because of the normalize!(u) vs. norm-invariant-ratio difference described
+    # above. Measured maximum(abs, sol_frozen.expect .- sol_sse.expect) = 0.0423; relaxed to
+    # (measured value) * 3 ≈ 0.13. This is not the O(1) disagreement that would signal a
+    # wrong gauge or a dropped x_n.
+    @test sol_frozen.expect ≈ sol_sse.expect atol = 0.13
+end

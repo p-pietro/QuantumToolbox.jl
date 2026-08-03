@@ -154,9 +154,12 @@ end
 
     # `qeye(2)` is used to divide out the (tiny) norm drift of the interpolated states
     e_ops = [op_target, qeye(2)]
+    # 1.0e-6 is deliberate: it keeps the worst deviation from the analytic curve around
+    # 1.0e-6, two orders below the assertions below, while 1.0e-8 makes this item take
+    # minutes instead of seconds (adaptive SDE step count scales like tol^(-2/3))
     opts = (
         e_ops = e_ops, ntraj = ntraj, progress_bar = Val(false),
-        keep_runs_results = Val(true), abstol = 1.0e-8, reltol = 1.0e-8,
+        keep_runs_results = Val(true), abstol = 1.0e-6, reltol = 1.0e-6,
     )
 
     sol = doqsdsolve(H, ψ0, tlist, sc_op, op_target; rng = MersenneTwister(42), opts...)

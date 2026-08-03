@@ -114,3 +114,165 @@ function (L::DOQSDDiffusionOperator)(w, v, p, t)
     end
     return w
 end
+
+@doc raw"""
+    doqsdsolveProblem(
+        H::Union{AbstractQuantumObject{Operator},Tuple},
+        ψ0::QuantumObject{Ket},
+        tlist::AbstractVector,
+        sc_ops::Union{Nothing,AbstractVector,Tuple,AbstractQuantumObject},
+        op_target::QuantumObject{Operator};
+        e_ops::Union{Nothing,AbstractVector,Tuple} = nothing,
+        params = NullParameters(),
+        rng::AbstractRNG = default_rng(),
+        phase_atol::Union{Nothing,Real} = nothing,
+        progress_bar::Union{Val,Bool} = Val(true),
+        store_measurement::Union{Val,Bool} = Val(false),
+        kwargs...,
+    )
+
+Generate the `SDEProblem` for the dynamically optimal quantum state diffusion (DO-QSD) unraveling of the Lindblad equation. This is defined by the following stochastic differential equation:
+
+```math
+d|\psi(t)\rangle = \left[-i \hat{H} + \sum_n \left(-\frac{1}{2} \hat{S}_n^\dagger \hat{S}_n - \frac{x_n^2}{2} + x_n u_n \hat{S}_n\right)\right] |\psi(t)\rangle dt + \sum_n \left(u_n \hat{S}_n - x_n\right) |\psi(t)\rangle dW_n(t)
+```
+
+where
+
+```math
+\ell_n = \langle \hat{S}_n \rangle_\psi,
+\qquad
+x_n = \mathrm{Re}\left(u_n \ell_n\right),
+```
+
+and the adaptive measurement phase ``u_n`` of each channel is chosen from the current state as
+
+```math
+u_n = i \frac{C_n^*}{|C_n|},
+\qquad
+C_n = \langle \hat{O} \hat{S}_n \rangle_\psi - \langle \hat{O} \rangle_\psi \langle \hat{S}_n \rangle_\psi,
+```
+
+with ``\hat{O}`` a Hermitian target observable (`op_target`). Since ``|u_n| = 1`` and ``\mathrm{Re}(u_n C_n) = 0``, the target observable loses its direct Wiener noise,
+
+```math
+d\langle \hat{O} \rangle_\psi = \langle \mathcal{L}^\dagger(\hat{O}) \rangle_\psi dt,
+```
+
+which makes the instantaneous growth rate of the trajectory variance of ``\langle \hat{O} \rangle_\psi`` minimal among all unravelings of this family. Whenever ``C_n = 0`` every unit phase is optimal, and the deterministic fallback ``u_n = 1`` is used. See [Cao2025Dynamically](@cite) for more details.
+
+Above, ``\hat{S}_n`` are the stochastic collapse operators and ``dW_n(t)`` is the real Wiener increment associated to ``\hat{S}_n``. The equation is interpreted in the Itô sense.
+
+# Arguments
+
+- `H`: Hamiltonian of the system ``\hat{H}``. It can be either a [`QuantumObject`](@ref), a [`QuantumObjectEvolution`](@ref), or a `Tuple` of operator-function pairs.
+- `ψ0`: Initial state of the system ``|\psi(0)\rangle``.
+- `tlist`: List of time points at which to save either the state or the expectation values of the system.
+- `sc_ops`: List of stochastic collapse operators ``\{\hat{S}_n\}_n``. It can be either a `Vector`, a `Tuple` or a [`AbstractQuantumObject`](@ref). It is recommended to use the last case when only one operator is provided. They must be time-independent.
+- `op_target`: The Hermitian observable ``\hat{O}`` whose trajectory variance is minimized. It must be time-independent.
+- `e_ops`: List of operators for which to calculate expectation values. It can be either a `Vector` or a `Tuple`.
+- `params`: `NullParameters` of parameters to pass to the solver.
+- `rng`: Random number generator for reproducibility.
+- `phase_atol`: The adaptive phase falls back to ``u_n = 1`` when ``|C_n|`` is below this threshold. Defaults to `eps(T)^(3//4)`, with `T` the floating-point type of the problem. Passing `phase_atol = Inf` freezes every phase at ``u_n = 1``, which recovers [`ssesolve`](@ref).
+- `progress_bar`: Whether to show the progress bar. Using non-`Val` types might lead to type instabilities.
+- `store_measurement`: Not supported by DO-QSD, see the notes below.
+- `kwargs`: The keyword arguments for the ODEProblem.
+
+# Notes
+
+- The states will be saved depend on the keyword argument `saveat` in `kwargs`.
+- If `e_ops` is empty, the default value of `saveat=tlist` (saving the states corresponding to `tlist`), otherwise, `saveat=[tlist[end]]` (only save the final state). You can also specify `e_ops` and `saveat` separately.
+- The default tolerances in `kwargs` are given as `reltol=2e-3` and `abstol=1e-3`.
+- `store_measurement = Val(true)` is not supported: the DO-QSD measurement record ``dY_n = 2 \mathrm{Re}(u_n \ell_n) dt + dW_n`` depends on the adaptive phases, hence on the state, while the measurement callback only handles fixed operators. Use [`ssesolve`](@ref) for a fixed-phase homodyne record.
+- The optimality is local in time: it minimizes the instantaneous growth of the variance of ``\langle \hat{O} \rangle_\psi``, and is not a proof of minimal variance at a prescribed final time. The observable can still acquire trajectory variance, because its drift depends on the stochastic state.
+- For more details about `kwargs` please refer to [`DifferentialEquations.jl` (Keyword Arguments)](https://docs.sciml.ai/DiffEqDocs/stable/basics/common_solver_opts/)
+
+!!! tip "Performance Tip"
+    When `sc_ops` contains only a single operator, it is recommended to pass only that operator as the argument. This ensures that the stochastic noise is diagonal, making the simulation faster.
+
+# Returns
+
+- `prob`: The `SDEProblem` for the DO-QSD time evolution of the system.
+"""
+function doqsdsolveProblem(
+        H::Union{AbstractQuantumObject{Operator}, Tuple},
+        ψ0::QuantumObject{Ket},
+        tlist::AbstractVector,
+        sc_ops::Union{Nothing, AbstractVector, Tuple, AbstractQuantumObject},
+        op_target::QuantumObject{Operator};
+        e_ops::Union{Nothing, AbstractVector, Tuple} = nothing,
+        params = NullParameters(),
+        rng::AbstractRNG = default_rng(),
+        phase_atol::Union{Nothing, Real} = nothing,
+        progress_bar::Union{Val, Bool} = Val(true),
+        store_measurement::Union{Val, Bool} = Val(false),
+        kwargs...,
+    )
+    haskey(kwargs, :save_idxs) &&
+        throw(ArgumentError("The keyword argument \"save_idxs\" is not supported in QuantumToolbox."))
+
+    getVal(makeVal(store_measurement)) && throw(
+        ArgumentError(
+            "The keyword argument \"store_measurement\" is not supported in doqsdsolve, since the DO-QSD measurement record depends on the state through the adaptive phases. Use ssesolve for a fixed-phase homodyne record.",
+        ),
+    )
+
+    sc_ops isa Nothing &&
+        throw(ArgumentError("The list of stochastic collapse operators must be provided. Use sesolveProblem instead."))
+    sc_ops_list = _make_c_ops_list(sc_ops) # If it is an AbstractQuantumObject but we need to iterate
+    sc_ops_isa_Qobj = sc_ops isa AbstractQuantumObject # We can avoid using non-diagonal noise if sc_ops is just an AbstractQuantumObject
+
+    # the adaptive phases are evaluated from the raw operators, which are never updated in
+    # time, so a time-dependent `sc_ops` would be silently frozen at its initial value
+    all(isconstant, sc_ops_list) ||
+        throw(ArgumentError("Time-dependent stochastic collapse operators are not supported in doqsdsolve."))
+    ishermitian(op_target) || throw(ArgumentError("The target operator must be Hermitian."))
+
+    H_eff_evo = _mcsolve_make_Heff_QobjEvo(H, sc_ops_list)
+    isoper(H_eff_evo) || throw(ArgumentError("The Hamiltonian must be an Operator."))
+    check_dimensions(H_eff_evo, op_target)
+
+    # Convert initial state to dense vector with complex element type (T) and check dimensions
+    T, ψ0, states_type, dimensions = _handle_init_state_and_sol_type_dims(H_eff_evo, ψ0)
+
+    sc_ops_evo_data = Tuple(map(get_data ∘ QobjEvo, sc_ops_list))
+
+    # `-i H_eff` already contains the `-½ Sₙ† Sₙ` term of the drift
+    K = cache_operator(get_data(-1im * QuantumObjectEvolution(H_eff_evo)), ψ0)
+    atol = isnothing(phase_atol) ? eps(_float_type(T))^(3 // 4) : _float_type(T)(phase_atol)
+
+    O_data = get_data(op_target)
+    A = DOQSDDriftOperator(K, sc_ops_evo_data, O_data, similar(ψ0), similar(ψ0), atol)
+    B = DOQSDDiffusionOperator(sc_ops_evo_data, O_data, similar(ψ0), atol)
+
+    tlist = _check_tlist(tlist, _float_type(T))
+
+    kwargs2 = _merge_saveat(tlist, e_ops, default_sde_solver_options(T); kwargs...)
+    kwargs3 = _merge_tstops(kwargs2, isconstant(H_eff_evo), tlist)
+    kwargs4 = _generate_stochastic_kwargs(
+        e_ops,
+        sc_ops_list,
+        makeVal(progress_bar),
+        tlist,
+        Val(false),
+        kwargs3,
+        SaveFuncSSESolve,
+        T,
+    )
+
+    tspan = (tlist[1], tlist[end])
+    noise = _make_noise(tspan[1], sc_ops, Val(false), rng)
+    noise_rate_prototype = sc_ops_isa_Qobj ? nothing : similar(ψ0, length(ψ0), length(sc_ops_list))
+    prob = SDEProblem{true}(
+        A,
+        B,
+        ψ0,
+        tspan,
+        params;
+        noise_rate_prototype = noise_rate_prototype,
+        noise = noise,
+        kwargs4...,
+    )
+
+    return TimeEvolutionProblem(prob, tlist, states_type, dimensions)
+end

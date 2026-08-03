@@ -87,3 +87,48 @@ end
     @test all(isfinite, Bn)
     @test Bn[:, 1] ≈ Sd[1] * ψ_fock
 end
+
+@testitem "doqsdsolve: problem construction and argument checking" begin
+    using LinearAlgebra
+
+    N = 4
+    a = destroy(N)
+    H = a' * a
+    ψ0 = fock(N, 1)
+    tlist = range(0, 1, 11)
+    sc_op = 0.5 * a
+    op_target = a' * a
+
+    prob = doqsdsolveProblem(H, ψ0, tlist, sc_op, op_target, progress_bar = Val(false))
+    @test prob isa QuantumToolbox.TimeEvolutionProblem
+    @test prob.prob.f.f isa QuantumToolbox.DOQSDDriftOperator
+    @test prob.prob.g isa QuantumToolbox.DOQSDDiffusionOperator
+    @test isnothing(prob.prob.noise_rate_prototype) # diagonal noise for a single operator
+    @test prob.times == tlist
+
+    # a `Vector` of operators gives non-diagonal noise
+    prob2 = doqsdsolveProblem(H, ψ0, tlist, [sc_op, 0.3 * a' * a], op_target, progress_bar = Val(false))
+    @test size(prob2.prob.noise_rate_prototype) == (N, 2)
+
+    # argument checking
+    @test_throws ArgumentError doqsdsolveProblem(H, ψ0, tlist, nothing, op_target, progress_bar = Val(false))
+    @test_throws ArgumentError doqsdsolveProblem(H, ψ0, Float64[], sc_op, op_target, progress_bar = Val(false))
+    @test_throws ArgumentError doqsdsolveProblem(H, ψ0, [0, 0.2, 0.1], sc_op, op_target, progress_bar = Val(false))
+    @test_throws ArgumentError doqsdsolveProblem(H, ψ0, [0, 0.1, 0.1, 0.2], sc_op, op_target, progress_bar = Val(false))
+    # the target observable must be Hermitian
+    @test_throws ArgumentError doqsdsolveProblem(H, ψ0, tlist, sc_op, a, progress_bar = Val(false))
+    # time-dependent stochastic collapse operators are not supported
+    @test_throws ArgumentError doqsdsolveProblem(
+        H, ψ0, tlist, QobjEvo((a, (p, t) -> exp(-t))), op_target, progress_bar = Val(false),
+    )
+    # the DO-QSD measurement record depends on the adaptive phases: not supported yet
+    @test_throws ArgumentError doqsdsolveProblem(
+        H, ψ0, tlist, sc_op, op_target, store_measurement = Val(true), progress_bar = Val(false),
+    )
+    @test_throws ArgumentError doqsdsolveProblem(
+        H, ψ0, tlist, sc_op, op_target, save_idxs = [1], progress_bar = Val(false),
+    )
+    @test_throws DimensionMismatch doqsdsolveProblem(
+        H, ψ0, tlist, sc_op, destroy(N + 1)' * destroy(N + 1), progress_bar = Val(false),
+    )
+end

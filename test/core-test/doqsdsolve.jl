@@ -302,3 +302,78 @@ end
     sol_adaptive = doqsdsolve(H, ψ0, tlist, sc_op, op_target; rng = MersenneTwister(19), opts...)
     @test maximum(abs, sol_adaptive.expect .- sol_sse.expect) > 0.1
 end
+
+@testitem "doqsdsolve: variance reduction for a non-closed observable" begin
+    using LinearAlgebra
+    using Random
+    using Statistics
+
+    N = 5
+    a = destroy(N)
+    γ = 1.0
+    Δ = 0.5
+    F = 0.8
+    H = Δ * a' * a + F * (a + a')
+    sc_op = sqrt(γ) * a
+    op_target = a' * a
+    ψ0 = fock(N, 0)
+    tlist = range(0, 4 / γ, 21)
+    e_ops = [op_target, qeye(N)]
+    ntraj = 100
+
+    # i[H, a'a] = i F (a - a') is not proportional to a'a, so <a'a> keeps a trajectory
+    # spread through its drift: DO-QSD reduces the variance without cancelling it.
+    sol_me = mesolve(H, ψ0, tlist, [sc_op], e_ops = e_ops, progress_bar = Val(false))
+    opts = (e_ops = e_ops, ntraj = ntraj, progress_bar = Val(false), keep_runs_results = Val(true))
+    sol = doqsdsolve(H, ψ0, tlist, sc_op, op_target; rng = MersenneTwister(11), opts...)
+    sol_sse = ssesolve(H, ψ0, tlist, sc_op; rng = MersenneTwister(11), opts...)
+
+    @test sum(abs, real(average_expect(sol)[1, :] .- sol_me.expect[1, :])) / length(tlist) < 0.05
+    @test sum(abs, real(average_expect(sol_sse)[1, :] .- sol_me.expect[1, :])) / length(tlist) < 0.15
+
+    std_doqsd = mean(abs, std_expect(sol)[1, :])
+    std_sse = mean(abs, std_expect(sol_sse)[1, :])
+    @test std_doqsd < 0.6 * std_sse
+end
+
+@testitem "doqsdsolve: type inference" begin
+    using Random
+
+    N = 4
+    a = destroy(N)
+    H = a' * a + 0.2 * (a + a')
+    ψ0 = fock(N, 0)
+    tlist = range(0, 1, 6)
+    op_target = a' * a
+    # a `Tuple` avoids the type instability of a `Vector` of operators
+    sc_ops_tuple = (0.5 * a, 0.3 * (a + a'))
+    e_ops = (op_target, a + a')
+    rng = MersenneTwister(3)
+
+    # Fixed steps are required here, and this is a real limitation worth understanding rather
+    # than a test convenience. With more than one channel the default algorithm is `SRA2()`,
+    # formally an additive-noise method, and DO-QSD's diffusion is far more state-sensitive
+    # than `ssesolve`'s because the phase `u_k` rotates with `arg(C_k)`: wherever `|C_k|` is
+    # small, an O(1)-magnitude diffusion column becomes an almost discontinuous function of
+    # the state, so the adaptive error estimate does not shrink with `dt` and the step size
+    # collapses to `dtmin`. Measured on this system with adaptive stepping: 15/20 trajectories
+    # abort from the vacuum and 18/20 from (|0⟩+|1⟩)/√2, against ~1/20 for `ssesolve`.
+    # Raising `phase_atol` only helps at values large enough to disable the adaptive phase
+    # (1/20 aborts at 0.1), so fixed stepping is the remedy — see the docstring note.
+    # This item tests type stability, not stepper robustness, so it pins the former only.
+    fixed = (ntraj = 5, rng = rng, adaptive = false, dt = 1.0e-3)
+
+    @inferred doqsdsolveEnsembleProblem(
+        H, ψ0, tlist, sc_ops_tuple, op_target,
+        e_ops = e_ops, progress_bar = Val(false), ntraj = 5, rng = rng,
+    )
+    @inferred doqsdsolve(H, ψ0, tlist, sc_ops_tuple, op_target; e_ops = e_ops, progress_bar = Val(false), fixed...)
+    @inferred doqsdsolve(H, ψ0, tlist, sc_ops_tuple, op_target; progress_bar = Val(false), fixed...)
+    @inferred doqsdsolve(H, ψ0, tlist, 0.5 * a, op_target; e_ops = e_ops, progress_bar = Val(false), fixed...)
+    @inferred doqsdsolve(H, ψ0, tlist, sc_ops_tuple, op_target; e_ops = e_ops, progress_bar = Val(true), fixed...)
+    # time-dependent Hamiltonian
+    @inferred doqsdsolve(
+        (H, (a + a', (p, t) -> 0.1 * cos(t))), ψ0, tlist, sc_ops_tuple, op_target;
+        e_ops = e_ops, progress_bar = Val(false), fixed...,
+    )
+end
